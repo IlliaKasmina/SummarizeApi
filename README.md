@@ -83,22 +83,22 @@ dotnet test SummarizeApi.slnx
 
 ```powershell
 # 1. Resource group (skip if it already exists)
-az group create --name SB_HCMLMS_ILKAS --location swedencentral
+az group create --name <resource-group> --location swedencentral
 
 # 2. Infrastructure (pass the API key as a secure parameter — do not commit it)
 az deployment group create `
-  --resource-group SB_HCMLMS_ILKAS `
+  --resource-group <resource-group> `
   --template-file infra/main.bicep `
   --parameters apiKey="<your-strong-api-key>"
 
 # Grab the web app name from the deployment outputs:
-az deployment group show -g SB_HCMLMS_ILKAS -n main --query properties.outputs
+az deployment group show -g <resource-group> -n main --query properties.outputs
 
 # 3. Publish and zip-deploy
 dotnet publish src/SummarizeApi -c Release -o publish
 Compress-Archive -Path publish/* -DestinationPath app.zip -Force
 az webapp deploy `
-  --resource-group SB_HCMLMS_ILKAS `
+  --resource-group <resource-group> `
   --name app-summarizeapi-dev `
   --src-path app.zip `
   --type zip
@@ -113,15 +113,16 @@ Resource names are deterministic — `<type>-summarizeapi-dev` (e.g. web app `ap
 [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml):
 
 - **Pull requests / pushes to `main`:** restore → build → test (results uploaded as artifact) → Bicep compile check → publish artifact.
-- **Pushes to `main` only:** Bicep deployment into the resource group → zip deploy of the published app → `/health` smoke test with retries.
+- **Pushes to `main` that changed `src/`:** zip deploy of the published app to the existing web app → `/health` smoke test with retries. Docs/infra-only pushes build and test but skip the deploy; a manual `workflow_dispatch` run always deploys.
+
+The pipeline ships **application code only**. Infrastructure is provisioned manually with `az deployment group create` (see "Deploy to Azure" above) — infra changes are infrequent, deliberate operations, and keeping them out of the pipeline means the workflow identity needs only deploy rights on the web app instead of Owner on the resource group.
 
 Authentication uses **OIDC federated credentials** — GitHub exchanges its workflow token for an Azure token at run time; no client secret is stored.
 
 ### One-time setup
 
 ```powershell
-# 1. Resource group (the pipeline deploys into it; it does not create it)
-az group create --name SB_HCMLMS_ILKAS --location swedencentral
+# 1. Provision the infrastructure manually first — see "Deploy to Azure" above.
 
 # 2. App registration + service principal for GitHub
 az ad app create --display-name "github-summarizeapi"   # note the appId
@@ -135,26 +136,33 @@ az ad app federated-credential create --id <appId> --parameters '{
   "audiences": ["api://AzureADTokenExchange"]
 }'
 
-# 4. RBAC on the resource group. Owner because the Bicep template creates a
-#    role assignment (web app -> OpenAI account); plain Contributor cannot do
-#    that. Alternative: Contributor + "Role Based Access Control Administrator".
-#    Without this step azure/login fails with "No subscriptions found".
-az role assignment create --assignee <appId> --role Owner `
-  --scope /subscriptions/<subscriptionId>/resourceGroups/SB_HCMLMS_ILKAS
+# 4. RBAC: the pipeline only zip-deploys, so "Website Contributor" on the
+#    resource group is enough (least privilege — no infra rights).
+#    Without any role assignment azure/login fails with "No subscriptions found".
+az role assignment create --assignee <appId> --role "Website Contributor" `
+  --scope /subscriptions/<subscriptionId>/resourceGroups/<resource-group>
 ```
 
-### GitHub repository secrets
+### GitHub repository secrets and variables
+
+Secrets (Settings → Secrets and variables → Actions → **Secrets**):
 
 | Secret | Value |
 |--------|-------|
 | `AZURE_CLIENT_ID` | `appId` from step 2 |
 | `AZURE_TENANT_ID` | `az account show --query tenantId -o tsv` |
 | `AZURE_SUBSCRIPTION_ID` | `az account show --query id -o tsv` |
-| `SUMMARIZE_API_KEY` | the X-Api-Key value (≥ 16 chars) |
+
+Variables (same page, **Variables** tab — non-sensitive config, kept out of the repo but visible in logs for debuggability):
+
+| Variable | Value |
+|----------|-------|
+| `AZURE_RESOURCE_GROUP` | resource group the web app lives in |
+| `AZURE_WEBAPP_NAME` | web app name, e.g. `app-summarizeapi-dev` |
 
 Add these as **repository secrets** (Settings → Secrets and variables → Actions → Repository secrets). Secrets stored in a GitHub *Environment* are only visible to jobs that declare `environment: <name>` — the deploy job doesn't, so environment secrets resolve empty and `azure/login` fails with "client-id and tenant-id not supplied." (If you prefer environments, add `environment:` to the deploy job *and* create a second federated credential with subject `repo:<owner>/<repo>:environment:<name>`.)
 
-The workflow assumes the repository root is this folder (where `SummarizeApi.slnx` lives). The resource group name is set in the workflow's `env:` block (`SB_HCMLMS_ILKAS`) — change it there if yours differs.
+The workflow assumes the repository root is this folder (where `SummarizeApi.slnx` lives). The deploy target (resource group + web app name) comes entirely from the repository variables above — nothing environment-specific lives in the workflow file.
 
 ## Example request
 
