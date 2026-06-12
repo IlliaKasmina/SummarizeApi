@@ -22,8 +22,10 @@ src/SummarizeApi/
   OpenApi/                         Swagger registration with X-Api-Key security scheme
 tests/SummarizeApi.Tests/          xUnit + NSubstitute unit tests
 infra/main.bicep                   App Service + Azure OpenAI + App Insights + RBAC
-infra/main.parameters.json         Deployment parameters
+.github/workflows/ci-cd.yml        Build/test/deploy pipeline (OIDC to Azure)
 ```
+
+All Bicep parameters have defaults except the `@secure()` API key, which is passed on the command line / pipeline — there is no parameters file.
 
 ## API contract
 
@@ -80,29 +82,31 @@ dotnet test SummarizeApi.slnx
 ## Deploy to Azure
 
 ```powershell
-# 1. Resource group
-az group create --name rg-summarizeapi --location swedencentral
+# 1. Resource group (skip if it already exists)
+az group create --name SB_HCMLMS_ILKAS --location swedencentral
 
 # 2. Infrastructure (pass the API key as a secure parameter — do not commit it)
 az deployment group create `
-  --resource-group rg-summarizeapi `
+  --resource-group SB_HCMLMS_ILKAS `
   --template-file infra/main.bicep `
   --parameters apiKey="<your-strong-api-key>"
 
 # Grab the web app name from the deployment outputs:
-az deployment group show -g rg-summarizeapi -n main --query properties.outputs
+az deployment group show -g SB_HCMLMS_ILKAS -n main --query properties.outputs
 
 # 3. Publish and zip-deploy
 dotnet publish src/SummarizeApi -c Release -o publish
 Compress-Archive -Path publish/* -DestinationPath app.zip -Force
 az webapp deploy `
-  --resource-group rg-summarizeapi `
-  --name <webAppName-from-outputs> `
+  --resource-group SB_HCMLMS_ILKAS `
+  --name app-summarizeapi-dev `
   --src-path app.zip `
   --type zip
 ```
 
-The Bicep template provisions: Linux B1 App Service plan, the web app (.NET 10, system-assigned identity, `/health` health check), an Azure OpenAI account (**local auth disabled** — Entra ID only) with a `gpt-4o-mini` deployment, the `Cognitive Services OpenAI User` role assignment for the web app identity, and Application Insights backed by Log Analytics. App settings (`AzureOpenAI__Endpoint`, `AzureOpenAI__DeploymentName`, `ApiKey__Key`, `APPLICATIONINSIGHTS_CONNECTION_STRING`) are wired automatically.
+The Bicep template provisions: Linux B1 App Service plan, the web app (.NET 10, system-assigned identity, `/health` health check), an Azure OpenAI account (**local auth disabled** — Entra ID only) with a `gpt-4o-mini` deployment (GlobalStandard, 20K TPM), the `Cognitive Services OpenAI User` role assignment for the web app identity, and Application Insights backed by Log Analytics. App settings (`AzureOpenAI__Endpoint`, `AzureOpenAI__DeploymentName`, `ApiKey__Key`, `APPLICATIONINSIGHTS_CONNECTION_STRING`) are wired automatically.
+
+Resource names are deterministic — `<type>-summarizeapi-dev` (e.g. web app `app-summarizeapi-dev`, OpenAI account `oai-summarizeapi-dev`) — so repeat deployments update the same resources in place (ARM incremental mode; nothing outside the template is touched).
 
 ## CI/CD with GitHub Actions
 
@@ -117,7 +121,7 @@ Authentication uses **OIDC federated credentials** — GitHub exchanges its work
 
 ```powershell
 # 1. Resource group (the pipeline deploys into it; it does not create it)
-az group create --name rg-summarizeapi --location swedencentral
+az group create --name SB_HCMLMS_ILKAS --location swedencentral
 
 # 2. App registration + service principal for GitHub
 az ad app create --display-name "github-summarizeapi"   # note the appId
@@ -134,8 +138,9 @@ az ad app federated-credential create --id <appId> --parameters '{
 # 4. RBAC on the resource group. Owner because the Bicep template creates a
 #    role assignment (web app -> OpenAI account); plain Contributor cannot do
 #    that. Alternative: Contributor + "Role Based Access Control Administrator".
+#    Without this step azure/login fails with "No subscriptions found".
 az role assignment create --assignee <appId> --role Owner `
-  --scope /subscriptions/<subscriptionId>/resourceGroups/rg-summarizeapi
+  --scope /subscriptions/<subscriptionId>/resourceGroups/SB_HCMLMS_ILKAS
 ```
 
 ### GitHub repository secrets
@@ -147,12 +152,14 @@ az role assignment create --assignee <appId> --role Owner `
 | `AZURE_SUBSCRIPTION_ID` | `az account show --query id -o tsv` |
 | `SUMMARIZE_API_KEY` | the X-Api-Key value (≥ 16 chars) |
 
-The workflow assumes the repository root is this folder (where `SummarizeApi.slnx` lives). The resource group name is set in the workflow's `env:` block (`rg-summarizeapi`) — change it there if yours differs.
+Add these as **repository secrets** (Settings → Secrets and variables → Actions → Repository secrets). Secrets stored in a GitHub *Environment* are only visible to jobs that declare `environment: <name>` — the deploy job doesn't, so environment secrets resolve empty and `azure/login` fails with "client-id and tenant-id not supplied." (If you prefer environments, add `environment:` to the deploy job *and* create a second federated credential with subject `repo:<owner>/<repo>:environment:<name>`.)
+
+The workflow assumes the repository root is this folder (where `SummarizeApi.slnx` lives). The resource group name is set in the workflow's `env:` block (`SB_HCMLMS_ILKAS`) — change it there if yours differs.
 
 ## Example request
 
 ```bash
-curl -s -X POST "https://<webAppName>.azurewebsites.net/summarize" \
+curl -s -X POST "https://app-summarizeapi-dev.azurewebsites.net/summarize" \
   -H "Content-Type: application/json" \
   -H "X-Api-Key: <your-strong-api-key>" \
   -d '{
@@ -178,7 +185,7 @@ Response:
 - **System prompt as a rule list.** The model is pinned to: summarize only the provided text, no added information or speculation (anti-hallucination); preserve named entities, dates, and numbers verbatim; hard word budget; single-paragraph output; reply in the input's language; output the summary only.
 - **Prompt-injection containment.** The document is wrapped in a `<document>` fence inside the *user* message, and the system prompt explicitly says to treat anything inside it as content, not instructions. Instructions and data never share a channel.
 - **Temperature 0** (greedy decoding) — same document gives the same summary on every call, with no creative drift.
-- **Max output tokens derived from `maxWords`:** prose averages ~1.3–1.5 tokens per word, so the budget is `maxWords * 2 + 32` (margin for punctuation/bullet markers), clamped at 1,500. The model is never cut off mid-sentence, but also can't ramble far past the requested length.
+- **Max output tokens derived from `maxWords`:** prose averages ~1.3–1.5 tokens per word, so the budget is `maxWords * 2 + 32` (margin for punctuation), clamped at 1,500. The model is never cut off mid-sentence, but also can't ramble far past the requested length. Note `summaryLength` in the response is **characters**, not words.
 
 ### Retry strategy
 
