@@ -6,6 +6,7 @@ A small ASP.NET Core Web API (.NET 10 LTS) that summarizes text using **Azure Op
 
 ```
 SummarizeApi.slnx                  Solution (XML-based .slnx format)
+Directory.Packages.props           Central Package Management (all NuGet versions)
 src/SummarizeApi/
   Program.cs                       Composition root: DI, options, pipeline (kept minimal)
   Endpoints/SummarizeEndpoints.cs  Thin HTTP layer: binding, validation, status codes
@@ -20,7 +21,7 @@ src/SummarizeApi/
   Options/                         AzureOpenAIOptions, ApiKeyOptions (options pattern)
   Validation/                      SummarizeRequestValidator (FluentValidation)
   OpenApi/                         Swagger registration with X-Api-Key security scheme
-tests/SummarizeApi.Tests/          xUnit + NSubstitute unit tests
+tests/SummarizeApi.Tests/          xUnit v3 + NSubstitute unit tests
 infra/main.bicep                   App Service + Azure OpenAI + App Insights + RBAC
 .github/workflows/ci-cd.yml        Build/test/deploy pipeline (OIDC to Azure)
 ```
