@@ -1,19 +1,24 @@
 # CI/CD for SummarizeApi.
 #
 # Pull requests:      build + tests + Bicep compile check.
-# Push to main:       same, then deploy infra (Bicep) and the app (zip deploy)
-#                     into the existing resource group, finishing with a
-#                     /health smoke test.
+# Push to main:       same, then — only if src/ changed — zip deploy of the
+#                     app to the existing web app, finishing with a /health
+#                     smoke test. workflow_dispatch always deploys (manual
+#                     override for redeploys without a code change).
+#
+# Infrastructure is NOT provisioned here — resources are deployed manually
+# with `az deployment group create` (see README "Deploy to Azure"). The
+# pipeline only ships application code, so its identity needs deploy rights
+# on the web app, nothing more.
 #
 # Azure auth uses OIDC federated credentials (azure/login) — no client secret
 # is stored in GitHub. Required repository secrets:
 #   AZURE_CLIENT_ID        app registration (federated credential) client id
 #   AZURE_TENANT_ID        Entra tenant id
 #   AZURE_SUBSCRIPTION_ID  target subscription id
-#   SUMMARIZE_API_KEY      value clients must send in X-Api-Key (>= 16 chars)
 #
-# One-time Azure setup (resource group + federated credential) is documented
-# in README.md under "CI/CD with GitHub Actions".
+# One-time Azure setup (federated credential + RBAC) is documented in
+# README.md under "CI/CD with GitHub Actions".
 
 name: ci-cd
 
@@ -24,8 +29,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# AZURE_RESOURCE_GROUP and AZURE_WEBAPP_NAME come from repository *variables*
+# (Settings -> Secrets and variables -> Actions -> Variables) so no
+# environment-specific names live in the repo. Variables, not secrets:
+# the values are not sensitive, and secrets would be masked in logs,
+# hiding the deploy target and smoke-test URL when debugging.
 env:
-  AZURE_RESOURCE_GROUP: SB_HCMLMS_ILKAS
+  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  AZURE_WEBAPP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
   DOTNET_VERSION: 10.0.x
 
 permissions:
@@ -40,8 +51,20 @@ concurrency:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    outputs:
+      code-changed: ${{ steps.changes.outputs.code }}
     steps:
       - uses: actions/checkout@v4
+
+      # Deploy gate: did application code actually change? Build and tests
+      # always run; the deploy job is skipped for docs/infra-only pushes.
+      - name: Detect code changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            code:
+              - 'src/**'
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -80,7 +103,11 @@ jobs:
           path: publish/
 
   deploy:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    # Deploys only on main pushes that touched src/ (or manual dispatch).
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event_name != 'pull_request' &&
+      (needs.build-test.outputs.code-changed == 'true' || github.event_name == 'workflow_dispatch')
     needs: build-test
     runs-on: ubuntu-latest
     steps:
@@ -92,21 +119,6 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      # The API key is passed via env so the secret never appears in the
-      # rendered shell command.
-      - name: Deploy infrastructure (Bicep)
-        id: infra
-        env:
-          API_KEY: ${{ secrets.SUMMARIZE_API_KEY }}
-        run: |
-          webAppName=$(az deployment group create \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --name "summarizeapi-${{ github.run_number }}" \
-            --template-file infra/main.bicep \
-            --parameters apiKey="$API_KEY" \
-            --query properties.outputs.webAppName.value -o tsv)
-          echo "webAppName=$webAppName" >> "$GITHUB_OUTPUT"
 
       - name: Download app artifact
         uses: actions/download-artifact@v4
@@ -121,13 +133,13 @@ jobs:
           cd ..
           az webapp deploy \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --name "${{ steps.infra.outputs.webAppName }}" \
+            --name "$AZURE_WEBAPP_NAME" \
             --src-path app.zip \
             --type zip
 
       - name: Smoke test /health
         run: |
-          url="https://${{ steps.infra.outputs.webAppName }}.azurewebsites.net/health"
+          url="https://${AZURE_WEBAPP_NAME}.azurewebsites.net/health"
           for i in $(seq 1 12); do
             if curl -fsS --max-time 10 "$url"; then
               echo "Health check passed."
