@@ -20,7 +20,7 @@ src/SummarizeApi/
   Options/                         AzureOpenAIOptions, ApiKeyOptions (options pattern)
   Validation/                      SummarizeRequestValidator (FluentValidation)
   OpenApi/                         Swagger registration with X-Api-Key security scheme
-tests/SummarizeApi.Tests/          xUnit + NSubstitute unit tests
+tests/SummarizeApi.Tests/          xUnit v3 + NSubstitute unit tests
 infra/main.bicep                   App Service + Azure OpenAI + App Insights + RBAC
 .github/workflows/ci-cd.yml        Build/test/deploy pipeline (OIDC to Azure)
 ```
