@@ -6,6 +6,7 @@ A small ASP.NET Core Web API (.NET 10 LTS) that summarizes text using **Azure Op
 
 ```
 SummarizeApi.slnx                  Solution (XML-based .slnx format)
+Directory.Packages.props           Central Package Management (all NuGet versions)
 src/SummarizeApi/
   Program.cs                       Composition root: DI, options, pipeline (kept minimal)
   Endpoints/SummarizeEndpoints.cs  Thin HTTP layer: binding, validation, status codes
