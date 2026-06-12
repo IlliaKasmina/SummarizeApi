@@ -1,0 +1,26 @@
+## .NET build artifacts
+bin/
+obj/
+out/
+publish/
+*.binlog
+
+## IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+## Test results
+TestResults/
+*.trx
+coverage*.json
+coverage*.xml
+
+## Local secrets / environment
+*.env
+appsettings.*.local.json
+
+## Deployment artifacts
+*.zip
